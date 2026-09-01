@@ -320,15 +320,13 @@ class CrossEncoder(BaseModel, FitMixin):
                 key=lambda x: x[0],  # Sort by chunk_id
             )
 
+            for _, result in output_list:
+                if isinstance(result, Exception):
+                    raise result
+
             # Handle the various output formats: torch tensors, numpy arrays, or
             # list of dictionaries, also when empty.
             scores = [output[1] for output in output_list]
-
-            # Check for errors in results
-            if any(len(output) > 2 and output[2] is not None for output in output_list):
-                # Error occurred in worker
-                error_output = next(output for output in output_list if len(output) > 2 and output[2])
-                raise RuntimeError(f"Error in worker process: {error_output[2]}")
 
             if scores:
                 if isinstance(scores[0], torch.Tensor):
@@ -365,31 +363,24 @@ class CrossEncoder(BaseModel, FitMixin):
 
         """
         while True:
-            chunk_id = None
             try:
                 chunk_id, sentence_pairs, kwargs = input_queue.get()
-                scores = model.predict(sentence_pairs, device=target_device, **kwargs)
-
-                # If multi-process scores are not on CPUs, move them to CPU, so they can all be concatenated later
-                if isinstance(scores, torch.Tensor) and scores.device.type != "cpu":
-                    scores = scores.cpu()
-                elif isinstance(scores, np.ndarray):
-                    scores = np.asarray(scores)
-                elif isinstance(scores, list):
-                    scores = [
-                        score.cpu() if isinstance(score, torch.Tensor) and score.device.type != "cpu" else score
-                        for score in scores
-                    ]
-                results_queue.put([chunk_id, scores])
-
-            except queue.Empty:
-                break
-            except Exception as e:
-                logger.error(f"Error in worker process on {target_device}: {e}")
                 try:
-                    results_queue.put([chunk_id, None, str(e)])
-                except Exception:
-                    pass
+                    scores = model.predict(sentence_pairs, device=target_device, **kwargs)
+
+                    # If multi-process scores are not on CPUs, move them to CPU, so they can all be concatenated later
+                    if isinstance(scores, torch.Tensor) and scores.device.type != "cpu":
+                        scores = scores.cpu()
+                    elif isinstance(scores, list):
+                        scores = [
+                            score.cpu() if isinstance(score, torch.Tensor) and score.device.type != "cpu" else score
+                            for score in scores
+                        ]
+                except Exception as exc:
+                    CrossEncoder._report_worker_failure(results_queue, chunk_id, exc, target_device)
+                    continue
+                results_queue.put([chunk_id, scores])
+            except queue.Empty:
                 break
 
     def _resolve_activation_fn(self, activation_fn_path: str) -> Callable | None:

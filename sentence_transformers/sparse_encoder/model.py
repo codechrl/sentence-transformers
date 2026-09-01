@@ -979,7 +979,6 @@ class SparseEncoder(BaseModel):
                 key=lambda x: x[0],
             )
 
-            # Check for errors from worker processes
             for output in output_list:
                 if isinstance(output[1], Exception):
                     raise output[1]
@@ -1012,19 +1011,15 @@ class SparseEncoder(BaseModel):
         while True:
             try:
                 chunk_id, inputs, kwargs = input_queue.get()
-                embeddings = model.encode(inputs, device=target_device, **kwargs)
-                if isinstance(embeddings, torch.Tensor) and embeddings.device.type != "cpu":
-                    embeddings = embeddings.cpu()
-                results_queue.put([chunk_id, embeddings])
-
-            except queue.Empty:
-                break
-            except Exception as e:
-                logger.error(f"Error in worker process on {target_device}: {e}")
                 try:
-                    results_queue.put([chunk_id, e])
-                except Exception:
-                    pass
+                    embeddings = model.encode(inputs, device=target_device, **kwargs)
+                    if isinstance(embeddings, torch.Tensor) and embeddings.device.type != "cpu":
+                        embeddings = embeddings.cpu()
+                except Exception as exc:
+                    SparseEncoder._report_worker_failure(results_queue, chunk_id, exc, target_device)
+                    continue
+                results_queue.put([chunk_id, embeddings])
+            except queue.Empty:
                 break
 
     def get_embedding_dimension(self) -> int | None:

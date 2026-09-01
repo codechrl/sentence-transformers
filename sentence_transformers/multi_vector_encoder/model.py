@@ -1633,24 +1633,21 @@ class MultiVectorEncoder(BaseModel):
         while True:
             try:
                 chunk_id, inputs, kwargs = input_queue.get()
-                embeddings = model.encode(inputs, device=target_device, **kwargs)
-                if isinstance(embeddings, list):
-                    # Move to CPU before crossing the process boundary (incl. output_value=None dicts).
-                    embeddings = [
-                        {key: value.cpu() if isinstance(value, Tensor) else value for key, value in emb.items()}
-                        if isinstance(emb, dict)
-                        else (emb.cpu() if isinstance(emb, Tensor) and emb.device.type != "cpu" else emb)
-                        for emb in embeddings
-                    ]
+                try:
+                    embeddings = model.encode(inputs, device=target_device, **kwargs)
+                    if isinstance(embeddings, list):
+                        # Move to CPU before crossing the process boundary (incl. output_value=None dicts).
+                        embeddings = [
+                            {key: value.cpu() if isinstance(value, Tensor) else value for key, value in emb.items()}
+                            if isinstance(emb, dict)
+                            else (emb.cpu() if isinstance(emb, Tensor) and emb.device.type != "cpu" else emb)
+                            for emb in embeddings
+                        ]
+                except Exception as exc:
+                    MultiVectorEncoder._report_worker_failure(results_queue, chunk_id, exc, target_device)
+                    continue
                 results_queue.put([chunk_id, embeddings])
             except queue.Empty:
-                break
-            except Exception as e:
-                logger.error(f"Error in worker process on {target_device}: {e}")
-                try:
-                    results_queue.put([chunk_id, e])
-                except Exception:
-                    pass
                 break
 
     def _push_to_hub_usage_tip(self, repo_id: str) -> str:

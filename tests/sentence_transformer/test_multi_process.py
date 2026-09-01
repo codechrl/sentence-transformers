@@ -1,91 +1,62 @@
 from __future__ import annotations
 
+import queue
+
 import numpy as np
 import pytest
 import torch
 
 from sentence_transformers import SentenceTransformer
+from tests.utils import CrashingModel
 
 # These tests fail if optimum.intel.openvino is imported, because openvinotoolkit/nncf
 # patches torch._C._nn.gelu in a way that breaks pickling. As a result, we may have issues
 # when running both backend tests and multi-process tests in the same session.
 
 
-class _AlwaysCrashingEncoder:
-    """Picklable stand-in for a model whose .encode() always raises inside a worker process.
-
-    Defined at module level (not nested in a test) because start_multi_process_pool/
-    _multi_process_worker run under the "spawn" multiprocessing context, which pickles by
-    import path.
-    """
-
-    def encode(self, inputs, device=None, **kwargs):
-        raise RuntimeError("simulated worker crash")
-
-
-class _CrashesOnPoisonInput:
-    """Picklable stand-in that fails only for a specific chunk, succeeding on the rest."""
-
-    def encode(self, inputs, device=None, **kwargs):
-        if "poison" in inputs:
-            raise RuntimeError("simulated worker crash")
-        return [[0.0]] * len(inputs)
-
-
-def test_multi_process_worker_reports_exception_instead_of_dying_silently():
-    """A model.encode() failure inside a worker must be reported on the output queue, not just
-    kill the worker process silently -- otherwise _multi_process's collection loop, which
-    expects exactly one result per submitted chunk, waits forever for a result that never
-    arrives."""
+@pytest.mark.parametrize("unpicklable", (False, True))
+def test_multi_process_worker_reports_encode_failure(unpicklable: bool) -> None:
     ctx = torch.multiprocessing.get_context("spawn")
     input_queue = ctx.Queue()
     output_queue = ctx.Queue()
     input_queue.put([0, ["text"], {}])
     process = ctx.Process(
         target=SentenceTransformer._multi_process_worker,
-        args=("cpu", _AlwaysCrashingEncoder(), input_queue, output_queue),
+        args=("cpu", CrashingModel(unpicklable=unpicklable), input_queue, output_queue),
         daemon=True,
     )
     process.start()
     try:
-        chunk_id, result = output_queue.get()
+        chunk_id, result = output_queue.get(timeout=60)
+    except queue.Empty:
+        pytest.fail("the worker did not report the failure, so _multi_process would block forever")
     finally:
         process.terminate()
-        process.join(timeout=5)
+        process.join(timeout=10)
 
     assert chunk_id == 0
     assert isinstance(result, Exception)
     assert "simulated worker crash" in str(result)
+    # The replacement for an exception that could not be pickled carries the worker-side frames
+    if unpicklable:
+        assert "in _crash" in str(result)
 
 
-def test_multi_process_raises_instead_of_hanging_when_a_worker_crashes():
-    """Regression test: one malformed chunk crashing a worker used to hang _multi_process
-    forever (blocking on output_queue.get() for a result that would never be produced) instead
-    of surfacing the failure to the caller."""
-    ctx = torch.multiprocessing.get_context("spawn")
-    input_queue = ctx.Queue()
-    output_queue = ctx.Queue()
-    processes = [
-        ctx.Process(
-            target=SentenceTransformer._multi_process_worker,
-            args=("cpu", _CrashesOnPoisonInput(), input_queue, output_queue),
-            daemon=True,
+def test_multi_process_raises_reported_worker_failure() -> None:
+    # _multi_process only reaches self when it has to create or tear down the pool itself, which a
+    # caller-provided pool skips, so plain queues and an uninitialized model are enough here.
+    pool = {"input": queue.Queue(), "output": queue.Queue(), "processes": [None]}
+    pool["output"].put([0, [[0.0]]])
+    pool["output"].put([1, RuntimeError("simulated worker crash")])
+
+    with pytest.raises(RuntimeError, match="simulated worker crash"):
+        SentenceTransformer._multi_process(
+            SentenceTransformer.__new__(SentenceTransformer),
+            inputs=["ok", "poison"],
+            pool=pool,
+            chunk_size=1,
+            show_progress_bar=False,
         )
-        for _ in range(2)
-    ]
-    for p in processes:
-        p.start()
-    pool = {"input": input_queue, "output": output_queue, "processes": processes}
-
-    try:
-        # chunk_size=1 isolates "poison" into its own chunk so exactly one worker crashes
-        # while the others keep succeeding.
-        with pytest.raises(RuntimeError, match="simulated worker crash"):
-            SentenceTransformer._multi_process(
-                object(), inputs=["ok"] * 5 + ["poison"] + ["ok"] * 5, pool=pool, chunk_size=1
-            )
-    finally:
-        SentenceTransformer.stop_multi_process_pool(pool)
 
 
 @pytest.mark.slow
