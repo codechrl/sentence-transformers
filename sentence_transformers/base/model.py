@@ -1634,8 +1634,8 @@ This pull request has been automatically generated to add {self.__class__.__name
         """
         raise NotImplementedError("This method should be implemented in subclasses.")
 
-    @staticmethod
-    def _report_worker_failure(chunk_id: int, exc: Exception, target_device: str) -> list[int | Exception]:
+    @classmethod
+    def _report_worker_failure(cls, chunk_id: int, exc: Exception, target_device: str) -> list[int | Exception]:
         """Log a chunk that a worker failed to process and build the result to enqueue for it.
 
         :meth:`_multi_process` blocks for exactly one result per submitted chunk, so a worker that
@@ -1643,7 +1643,7 @@ This pull request has been automatically generated to add {self.__class__.__name
         after ``put`` returns, so an exception that cannot round-trip is replaced by its formatted
         traceback rather than being dropped there.
         """
-        logger.exception(f"Error in worker process on {target_device} for chunk {chunk_id}")
+        logger.exception(f"Error in {cls.__name__} worker process on {target_device} for chunk {chunk_id}")
         try:
             pickle.loads(pickle.dumps(exc))
         except Exception:

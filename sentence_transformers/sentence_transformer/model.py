@@ -4,7 +4,6 @@ import copy
 import itertools
 import logging
 import math
-import queue
 import warnings
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
@@ -1164,14 +1163,15 @@ class SentenceTransformer(BaseModel, FitMixin):
             output_queue: torch.multiprocessing.Queue = pool["output"]
 
             # Send inputs to the input queue in chunks
-            chunk_id = -1
-            for chunk_id, chunk_start in enumerate(range(0, len(inputs), chunk_size)):
+            num_chunks = math.ceil(len(inputs) / chunk_size)
+            for chunk_id in range(num_chunks):
+                chunk_start = chunk_id * chunk_size
                 chunk = inputs[chunk_start : chunk_start + chunk_size]
                 input_queue.put([chunk_id, chunk, encode_kwargs])
 
             # Collect results from the output queue
             output_list = sorted(
-                [output_queue.get() for _ in trange(chunk_id + 1, desc="Chunks", disable=not show_progress_bar)],
+                [output_queue.get() for _ in trange(num_chunks, desc="Chunks", disable=not show_progress_bar)],
                 key=lambda x: x[0],
             )
 
@@ -1207,26 +1207,21 @@ class SentenceTransformer(BaseModel, FitMixin):
         Workers are terminated externally via ``stop_multi_process_pool``.
         """
         while True:
+            chunk_id, inputs, kwargs = input_queue.get()
             try:
-                chunk_id, inputs, kwargs = input_queue.get()
-                try:
-                    embeddings = model.encode(inputs, device=target_device, **kwargs)
-                    # Move embeddings to CPU if needed
-                    if isinstance(embeddings, torch.Tensor) and embeddings.device.type != "cpu":
-                        embeddings = embeddings.cpu()
-                    elif isinstance(embeddings, dict):
-                        embeddings = {
-                            key: value.cpu()
-                            if isinstance(value, torch.Tensor) and value.device.type != "cpu"
-                            else value
-                            for key, value in embeddings.items()
-                        }
-                except Exception as exc:
-                    results_queue.put(SentenceTransformer._report_worker_failure(chunk_id, exc, target_device))
-                    continue
+                embeddings = model.encode(inputs, device=target_device, **kwargs)
+                # Move embeddings to CPU if needed
+                if isinstance(embeddings, torch.Tensor) and embeddings.device.type != "cpu":
+                    embeddings = embeddings.cpu()
+                elif isinstance(embeddings, dict):
+                    embeddings = {
+                        key: value.cpu() if isinstance(value, torch.Tensor) and value.device.type != "cpu" else value
+                        for key, value in embeddings.items()
+                    }
+            except Exception as exc:
+                results_queue.put(SentenceTransformer._report_worker_failure(chunk_id, exc, target_device))
+            else:
                 results_queue.put([chunk_id, embeddings])
-            except queue.Empty:
-                break
 
     def set_pooling_include_prompt(self, include_prompt: bool) -> None:
         """

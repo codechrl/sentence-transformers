@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pickle
-import queue
 
 import pytest
 
@@ -9,15 +8,23 @@ from sentence_transformers import CrossEncoder, MultiVectorEncoder, SentenceTran
 from tests.utils import CrashingModel
 
 
+class _StopWorker(BaseException):
+    """Breaks the worker's endless loop once its single chunk has been handed over.
+
+    Not an ``Exception``, because a worker that caught it would report it as a chunk failure and
+    then loop on it forever.
+    """
+
+
 class _OneShotQueue:
-    """Hands out a single chunk, then reports empty so the worker loop exits."""
+    """Hands out a single chunk, then stops the worker loop."""
 
     def __init__(self, item) -> None:
         self._items = [item]
 
     def get(self, *args, **kwargs):
         if not self._items:
-            raise queue.Empty
+            raise _StopWorker
         return self._items.pop(0)
 
 
@@ -35,9 +42,10 @@ class _RecordingQueue:
 )
 def test_multi_process_worker_reports_inference_failure(model_class, unpicklable: bool) -> None:
     results_queue = _RecordingQueue()
-    model_class._multi_process_worker(
-        "cpu", CrashingModel(unpicklable=unpicklable), _OneShotQueue([0, ["text"], {}]), results_queue
-    )
+    with pytest.raises(_StopWorker):
+        model_class._multi_process_worker(
+            "cpu", CrashingModel(unpicklable=unpicklable), _OneShotQueue([0, ["text"], {}]), results_queue
+        )
 
     # _multi_process blocks for exactly one result per submitted chunk
     assert len(results_queue.items) == 1

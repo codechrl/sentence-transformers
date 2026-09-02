@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import queue
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from multiprocessing import Queue
@@ -309,14 +308,15 @@ class CrossEncoder(BaseModel, FitMixin):
             output_queue: torch.multiprocessing.Queue = pool["output"]
 
             # Send inputs to the input queue in chunks
-            chunk_id = -1  # We default to -1 to handle empty input gracefully
-            for chunk_id, chunk_start in enumerate(range(0, len(inputs), chunk_size)):
+            num_chunks = math.ceil(len(inputs) / chunk_size)
+            for chunk_id in range(num_chunks):
+                chunk_start = chunk_id * chunk_size
                 chunk = inputs[chunk_start : chunk_start + chunk_size]
                 input_queue.put([chunk_id, chunk, predict_kwargs])
 
             # Collect results from output queue
             output_list = sorted(
-                [output_queue.get() for _ in trange(chunk_id + 1, desc="Chunks", disable=not show_progress_bar)],
+                [output_queue.get() for _ in trange(num_chunks, desc="Chunks", disable=not show_progress_bar)],
                 key=lambda x: x[0],  # Sort by chunk_id
             )
 
@@ -333,8 +333,6 @@ class CrossEncoder(BaseModel, FitMixin):
                     scores = torch.cat(scores)
                 elif isinstance(scores[0], np.ndarray):
                     scores = np.concatenate(scores, axis=0)
-                elif isinstance(scores[0], list):
-                    scores = sum(scores, [])
                 else:
                     scores = sum(scores, [])
 
@@ -363,25 +361,22 @@ class CrossEncoder(BaseModel, FitMixin):
 
         """
         while True:
+            chunk_id, sentence_pairs, kwargs = input_queue.get()
             try:
-                chunk_id, sentence_pairs, kwargs = input_queue.get()
-                try:
-                    scores = model.predict(sentence_pairs, device=target_device, **kwargs)
+                scores = model.predict(sentence_pairs, device=target_device, **kwargs)
 
-                    # If multi-process scores are not on CPUs, move them to CPU, so they can all be concatenated later
-                    if isinstance(scores, torch.Tensor) and scores.device.type != "cpu":
-                        scores = scores.cpu()
-                    elif isinstance(scores, list):
-                        scores = [
-                            score.cpu() if isinstance(score, torch.Tensor) and score.device.type != "cpu" else score
-                            for score in scores
-                        ]
-                except Exception as exc:
-                    results_queue.put(CrossEncoder._report_worker_failure(chunk_id, exc, target_device))
-                    continue
+                # If multi-process scores are not on CPUs, move them to CPU, so they can all be concatenated later
+                if isinstance(scores, torch.Tensor) and scores.device.type != "cpu":
+                    scores = scores.cpu()
+                elif isinstance(scores, list):
+                    scores = [
+                        score.cpu() if isinstance(score, torch.Tensor) and score.device.type != "cpu" else score
+                        for score in scores
+                    ]
+            except Exception as exc:
+                results_queue.put(CrossEncoder._report_worker_failure(chunk_id, exc, target_device))
+            else:
                 results_queue.put([chunk_id, scores])
-            except queue.Empty:
-                break
 
     def _resolve_activation_fn(self, activation_fn_path: str) -> Callable | None:
         """Instantiate an activation function from a dotted path string, respecting trust_remote_code."""
