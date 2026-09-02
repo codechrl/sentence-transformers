@@ -377,7 +377,7 @@ class CrossEncoder(BaseModel, FitMixin):
                             for score in scores
                         ]
                 except Exception as exc:
-                    CrossEncoder._report_worker_failure(results_queue, chunk_id, exc, target_device)
+                    results_queue.put(CrossEncoder._report_worker_failure(chunk_id, exc, target_device))
                     continue
                 results_queue.put([chunk_id, scores])
             except queue.Empty:

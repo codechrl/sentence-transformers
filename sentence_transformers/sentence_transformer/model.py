@@ -1222,7 +1222,7 @@ class SentenceTransformer(BaseModel, FitMixin):
                             for key, value in embeddings.items()
                         }
                 except Exception as exc:
-                    SentenceTransformer._report_worker_failure(results_queue, chunk_id, exc, target_device)
+                    results_queue.put(SentenceTransformer._report_worker_failure(chunk_id, exc, target_device))
                     continue
                 results_queue.put([chunk_id, embeddings])
             except queue.Empty:

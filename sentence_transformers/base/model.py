@@ -1635,8 +1635,8 @@ This pull request has been automatically generated to add {self.__class__.__name
         raise NotImplementedError("This method should be implemented in subclasses.")
 
     @staticmethod
-    def _report_worker_failure(results_queue: Queue, chunk_id: int, exc: Exception, target_device: str) -> None:
-        """Report a chunk that a worker failed to process on the results queue.
+    def _report_worker_failure(chunk_id: int, exc: Exception, target_device: str) -> list[int | Exception]:
+        """Log a chunk that a worker failed to process and build the result to enqueue for it.
 
         :meth:`_multi_process` blocks for exactly one result per submitted chunk, so a worker that
         dies without reporting leaves it waiting forever. The queue pickles in a feeder thread
@@ -1648,7 +1648,7 @@ This pull request has been automatically generated to add {self.__class__.__name
             pickle.loads(pickle.dumps(exc))
         except Exception:
             exc = RuntimeError("".join(traceback.format_exception(exc)))
-        results_queue.put([chunk_id, exc])
+        return [chunk_id, exc]
 
     @property
     def tokenizer(self) -> Any:
